@@ -1721,3 +1721,288 @@ app.put('/api/admin/users/:id/toggle', auth, roleCheck('admin'), async (req: Req
     });
   }
 });
+
+// ============================================
+// VETERINARIAN ROUTES
+// ============================================
+
+// Get veterinarian appointments
+app.get('/api/veterinarian/appointments', auth, roleCheck('veterinarian'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { status, date } = req.query;
+    const query: any = { veterinarian: req.user?._id };
+
+    if (status) query.status = status;
+    if (date) query.date = new Date(date as string);
+
+    const appointments = await Appointment.find(query)
+      .populate('client', 'name email phone')
+      .populate('pet', 'name species breed age image')
+      .sort({ date: 1, time: 1 });
+
+    return res.status(200).json({
+      success: true,
+      data: { appointments }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get veterinarian stats
+app.get('/api/veterinarian/stats', auth, roleCheck('veterinarian'), async (req: AuthRequest, res: Response) => {
+  try {
+    const vetId = req.user?._id;
+
+    const [
+      totalAppointments,
+      completedAppointments,
+      pendingAppointments,
+      todayAppointments,
+      totalPrescriptions
+    ] = await Promise.all([
+      Appointment.countDocuments({ veterinarian: vetId }),
+      Appointment.countDocuments({ veterinarian: vetId, status: 'completed' }),
+      Appointment.countDocuments({ veterinarian: vetId, status: 'scheduled' }),
+      Appointment.countDocuments({
+        veterinarian: vetId,
+        date: {
+          $gte: new Date(new Date().setHours(0, 0, 0, 0)),
+          $lt: new Date(new Date().setHours(23, 59, 59, 999))
+        }
+      }),
+      Prescription.countDocuments({ veterinarian: vetId })
+    ]);
+
+    const stats = {
+      totalAppointments,
+      completedAppointments,
+      pendingAppointments,
+      todayAppointments,
+      totalPrescriptions,
+      completionRate: totalAppointments > 0
+        ? Math.round((completedAppointments / totalAppointments) * 100)
+        : 0
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: stats
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// ============================================
+// HEALTH CHECK
+// ============================================
+
+app.get('/api/health', (req: Request, res: Response) => {
+  res.status(200).json({
+    status: 'success',
+    message: '🏥 PawMed Veterinary Clinic API is running',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ============================================
+// 404 HANDLER
+// ============================================
+
+app.use((req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    message: `Route ${req.originalUrl} not found`
+  });
+});
+
+// ============================================
+// ERROR HANDLER
+// ============================================
+
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  console.error('Error:', err);
+
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyValue || {})[0];
+    return res.status(400).json({
+      success: false,
+      message: `Duplicate value entered for ${field} field`
+    });
+  }
+
+  if (err.name === 'ValidationError') {
+    const message = Object.values(err.errors || {}).map((val: any) => val.message);
+    return res.status(400).json({
+      success: false,
+      message: message.join(', ')
+    });
+  }
+
+  res.status(err.statusCode || 500).json({
+    success: false,
+    message: err.message || 'Server Error',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
+});
+
+// ============================================
+// SEED DATABASE
+// ============================================
+
+const seedDatabase = async () => {
+  try {
+    // Create Admin
+    const adminExists = await User.findOne({ email: 'admin@pawmed.com' });
+    if (!adminExists) {
+      await User.create({
+        name: 'Admin',
+        email: 'admin@pawmed.com',
+        password: 'Admin@123',
+        role: 'admin',
+        phone: '+1234567890',
+        isActive: true,
+        emailVerified: true
+      });
+      console.log('✅ Admin user created');
+    }
+
+    // Create Veterinarian
+    const vetExists = await User.findOne({ email: 'dr.smith@pawmed.com' });
+    if (!vetExists) {
+      await User.create({
+        name: 'Dr. Sarah Smith',
+        email: 'dr.smith@pawmed.com',
+        password: 'Vet@123',
+        role: 'veterinarian',
+        phone: '+1234567891',
+        specialization: ['Small Animal Medicine', 'Surgery'],
+        licenseNumber: 'VET-2024-001',
+        experience: 8,
+        isActive: true,
+        emailVerified: true
+      });
+      console.log('✅ Veterinarian created');
+    }
+
+    // Create Test Client
+    const clientExists = await User.findOne({ email: 'john@test.com' });
+    if (!clientExists) {
+      await User.create({
+        name: 'John Doe',
+        email: 'john@test.com',
+        password: 'Client@123',
+        role: 'client',
+        phone: '+1234567892',
+        isActive: true,
+        emailVerified: true
+      });
+      console.log('✅ Test client created');
+    }
+
+    // Create Services
+    const services = [
+      {
+        name: 'General Health Checkup',
+        description: 'Comprehensive physical examination including vital signs, weight check, and overall health assessment',
+        category: 'consultation',
+        price: 60,
+        duration: 30,
+        isAvailable: true,
+        requiresSpecialist: false
+      },
+      {
+        name: 'Vaccination Package',
+        description: 'Complete vaccination including rabies, distemper, and parvovirus vaccines',
+        category: 'vaccination',
+        price: 85,
+        duration: 20,
+        isAvailable: true,
+        requiresSpecialist: false
+      },
+      {
+        name: 'Spay/Neuter Surgery',
+        description: 'Surgical sterilization procedure with pre-surgical blood work and post-operative care',
+        category: 'surgery',
+        price: 350,
+        duration: 90,
+        isAvailable: true,
+        requiresSpecialist: true
+      },
+      {
+        name: 'Dental Cleaning',
+        description: 'Professional teeth cleaning, scaling, and polishing under anesthesia',
+        category: 'dental',
+        price: 250,
+        duration: 60,
+        isAvailable: true,
+        requiresSpecialist: false
+      },
+      {
+        name: 'Emergency Care',
+        description: '24/7 emergency medical care for critical conditions',
+        category: 'emergency',
+        price: 200,
+        duration: 60,
+        isAvailable: true,
+        requiresSpecialist: true
+      }
+    ];
+
+    for (const serviceData of services) {
+      const exists = await Service.findOne({ name: serviceData.name });
+      if (!exists) {
+        await Service.create(serviceData);
+        console.log(`✅ Service created: ${serviceData.name}`);
+      }
+    }
+
+    console.log('✅ Database seeded successfully');
+    console.log('\n📋 Demo Credentials:');
+    console.log('  🔐 Admin: admin@pawmed.com / Admin@123');
+    console.log('  🔐 Veterinarian: dr.smith@pawmed.com / Vet@123');
+    console.log('  🔐 Client: john@test.com / Client@123');
+  } catch (error: any) {
+    console.error('❌ Error seeding database:', error.message);
+  }
+};
+
+// ============================================
+// START SERVER
+// ============================================
+
+const startServer = async () => {
+  await connectDB();
+
+  if (process.env.NODE_ENV === 'development') {
+    await seedDatabase();
+  }
+
+  app.listen(PORT, () => {
+    console.log(`\n🏥 PawMed Veterinary Clinic API running on port ${PORT}`);
+    console.log(`📚 Health Check: http://localhost:${PORT}/api/health`);
+    console.log(`🔐 Login: http://localhost:${PORT}/api/auth/login`);
+    console.log(`🔁 Issue Token (internal): http://localhost:${PORT}/api/auth/issue-token`);
+    console.log(`🐾 Pets: http://localhost:${PORT}/api/pets`);
+    console.log(`📋 Services: http://localhost:${PORT}/api/services`);
+    console.log(`💊 Prescriptions: http://localhost:${PORT}/api/prescriptions`);
+    console.log(`💰 Payments: http://localhost:${PORT}/api/payments`);
+    console.log(`📋 Medical Records: http://localhost:${PORT}/api/medicalrecords`);
+    console.log(`📊 Admin Dashboard: http://localhost:${PORT}/api/admin/dashboard`);
+    console.log('\n📋 Demo Credentials:');
+    console.log('  🔐 Admin: admin@pawmed.com / Admin@123');
+    console.log('  🔐 Veterinarian: dr.smith@pawmed.com / Vet@123');
+    console.log('  🔐 Client: john@test.com / Client@123');
+  });
+};
+
+startServer();
+
+export default app;
