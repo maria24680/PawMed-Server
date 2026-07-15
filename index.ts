@@ -1029,3 +1029,272 @@ app.put('/api/appointments/:id/cancel', auth, async (req: Request, res: Response
     });
   }
 });
+
+// ============================================
+// SERVICE ROUTES
+// ============================================
+
+// Get all services (Public)
+app.get('/api/services', async (req: Request, res: Response) => {
+  try {
+    const { category, search, minPrice, maxPrice } = req.query;
+    const query: any = { isAvailable: true };
+
+    if (category) query.category = category;
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
+    if (minPrice || maxPrice) {
+      query.price = {};
+      if (minPrice) query.price.$gte = Number(minPrice);
+      if (maxPrice) query.price.$lte = Number(maxPrice);
+    }
+
+    const services = await Service.find(query).sort({ price: 1 });
+
+    return res.status(200).json({
+      success: true,
+      data: { services }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get service by ID (Public)
+app.get('/api/services/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const service = await Service.findById(id);
+
+    if (!service) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { service }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Create service (Admin only)
+app.post('/api/services', auth, roleCheck('admin'), async (req: Request, res: Response) => {
+  try {
+    const service = await Service.create(req.body);
+    return res.status(201).json({
+      success: true,
+      message: 'Service created successfully',
+      data: { service }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Update service (Admin only)
+app.put('/api/services/:id', auth, roleCheck('admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const service = await Service.findByIdAndUpdate(id, req.body, { new: true, runValidators: true });
+
+    if (!service) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Service updated successfully',
+      data: { service }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Delete service (Admin only)
+app.delete('/api/services/:id', auth, roleCheck('admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const service = await Service.findByIdAndDelete(id);
+
+    if (!service) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Service deleted successfully'
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// ============================================
+// PRESCRIPTION ROUTES
+// ============================================
+
+// Create prescription (Vet only)
+app.post('/api/prescriptions', auth, roleCheck('veterinarian', 'admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { petId, medications, diagnosis, notes, validUntil, isRefillable, refillsRemaining } = req.body;
+
+    const pet = await Pet.findById(petId);
+    if (!pet) {
+      return res.status(404).json({ message: 'Pet not found' });
+    }
+
+    const prescription = await Prescription.create({
+      pet: petId,
+      veterinarian: req.user?._id,
+      client: pet.owner,
+      medications,
+      diagnosis,
+      notes,
+      validUntil,
+      isRefillable: isRefillable || false,
+      refillsRemaining: refillsRemaining || 0
+    });
+
+    const populatedPrescription = await Prescription.findById(prescription._id)
+      .populate('pet', 'name species breed')
+      .populate('veterinarian', 'name specialization')
+      .populate('client', 'name email phone');
+
+    return res.status(201).json({
+      success: true,
+      message: 'Prescription created successfully',
+      data: { prescription: populatedPrescription }
+    });
+  } catch (error: any) {
+    console.error('Prescription Creation Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get all prescriptions
+app.get('/api/prescriptions', auth, async (req: AuthRequest, res: Response) => {
+  try {
+    const query: any = {};
+
+    if (req.user?.role === 'client') {
+      query.client = req.user._id;
+    } else if (req.user?.role === 'veterinarian') {
+      query.veterinarian = req.user._id;
+    }
+
+    const prescriptions = await Prescription.find(query)
+      .populate('pet', 'name species breed')
+      .populate('veterinarian', 'name specialization')
+      .populate('client', 'name email')
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      data: { prescriptions }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get prescription by ID
+app.get('/api/prescriptions/:id', auth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const prescription = await Prescription.findById(id)
+      .populate('pet', 'name species breed age')
+      .populate('veterinarian', 'name specialization')
+      .populate('client', 'name email phone');
+
+    if (!prescription) {
+      return res.status(404).json({ message: 'Prescription not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { prescription }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Update prescription
+app.put('/api/prescriptions/:id', auth, roleCheck('veterinarian', 'admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const prescription = await Prescription.findByIdAndUpdate(
+      id,
+      req.body,
+      { new: true, runValidators: true }
+    );
+
+    if (!prescription) {
+      return res.status(404).json({ message: 'Prescription not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Prescription updated successfully',
+      data: { prescription }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Delete prescription
+app.delete('/api/prescriptions/:id', auth, roleCheck('veterinarian', 'admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const prescription = await Prescription.findByIdAndDelete(id);
+
+    if (!prescription) {
+      return res.status(404).json({ message: 'Prescription not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Prescription deleted successfully'
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
