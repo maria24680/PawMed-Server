@@ -1298,3 +1298,426 @@ app.delete('/api/prescriptions/:id', auth, roleCheck('veterinarian', 'admin'), a
     });
   }
 });
+// ============================================
+// PAYMENT ROUTES
+// ============================================
+
+// Create payment
+app.post('/api/payments', auth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { appointmentId, amount, paymentMethod, stripePaymentId } = req.body;
+
+    // Check if appointment exists
+    const appointment = await Appointment.findById(appointmentId);
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Appointment not found'
+      });
+    }
+
+    // Check if user owns this appointment
+    if (appointment.client.toString() !== req.user?._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to pay for this appointment'
+      });
+    }
+
+    // Check if already paid
+    if (appointment.paymentStatus === 'paid') {
+      return res.status(400).json({
+        success: false,
+        message: 'Appointment already paid'
+      });
+    }
+
+    // Create payment
+    const payment = await Payment.create({
+      appointment: appointmentId,
+      user: req.user?._id,
+      amount: amount || appointment.amount || 0,
+      currency: 'usd',
+      stripePaymentId: stripePaymentId || `pi_${Date.now()}`,
+      status: 'succeeded',
+      paymentMethod: paymentMethod || 'card',
+      receiptUrl: `https://receipt.stripe.com/${stripePaymentId || Date.now()}`
+    });
+
+    // Update appointment payment status
+    await Appointment.findByIdAndUpdate(appointmentId, {
+      paymentStatus: 'paid',
+      paymentId: payment.stripePaymentId,
+      amount: amount || appointment.amount || 0
+    });
+
+    const populatedPayment = await Payment.findById(payment._id)
+      .populate('appointment', 'date time status pet')
+      .populate('user', 'name email');
+
+    return res.status(201).json({
+      success: true,
+      message: 'Payment created successfully',
+      data: { payment: populatedPayment }
+    });
+  } catch (error: any) {
+    console.error('Payment Creation Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get all payments
+app.get('/api/payments', auth, async (req: AuthRequest, res: Response) => {
+  try {
+    const query: any = {};
+
+    // Clients can only see their own payments
+    if (req.user?.role === 'client') {
+      query.user = req.user._id;
+    }
+
+    const payments = await Payment.find(query)
+      .populate('appointment', 'date time status pet')
+      .populate('user', 'name email')
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      data: { payments }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get payment by ID
+app.get('/api/payments/:id', auth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const payment = await Payment.findById(id)
+      .populate('appointment', 'date time status pet')
+      .populate('user', 'name email');
+
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { payment }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get payment by appointment ID
+app.get('/api/payments/appointment/:appointmentId', auth, async (req: Request, res: Response) => {
+  try {
+    const { appointmentId } = req.params;
+    const payment = await Payment.findOne({ appointment: appointmentId })
+      .populate('appointment', 'date time status pet')
+      .populate('user', 'name email');
+
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found for this appointment'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { payment }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// ============================================
+// MEDICAL RECORD ROUTES
+// ============================================
+
+// Create medical record (Vet only)
+app.post('/api/medicalrecords', auth, roleCheck('veterinarian', 'admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const medicalRecordData = {
+      ...req.body,
+      veterinarian: req.user?._id
+    };
+
+    const pet = await Pet.findById(medicalRecordData.pet);
+    if (!pet) {
+      return res.status(404).json({ message: 'Pet not found' });
+    }
+
+    const medicalRecord = await MedicalRecord.create(medicalRecordData);
+
+    await Pet.findByIdAndUpdate(pet._id, { lastVisit: new Date() });
+
+    const populatedRecord = await MedicalRecord.findById(medicalRecord._id)
+      .populate('pet', 'name species breed')
+      .populate('veterinarian', 'name specialization')
+      .populate('appointment', 'date time');
+
+    return res.status(201).json({
+      success: true,
+      message: 'Medical record created successfully',
+      data: { medicalRecord: populatedRecord }
+    });
+  } catch (error: any) {
+    console.error('Medical Record Creation Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get all medical records
+app.get('/api/medicalrecords', auth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { petId, status } = req.query;
+    const query: any = {};
+
+    if (petId) query.pet = petId;
+    if (status) query.status = status;
+
+    if (req.user?.role === 'client') {
+      const pets = await Pet.find({ owner: req.user._id }).select('_id');
+      query.pet = { $in: pets.map(p => p._id) };
+    } else if (req.user?.role === 'veterinarian') {
+      query.veterinarian = req.user._id;
+    }
+
+    const medicalRecords = await MedicalRecord.find(query)
+      .populate('pet', 'name species breed')
+      .populate('veterinarian', 'name specialization')
+      .populate('appointment', 'date time')
+      .populate('medications.prescribedBy', 'name')
+      .sort({ visitDate: -1 });
+
+    return res.status(200).json({
+      success: true,
+      data: { medicalRecords }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get medical record by ID
+app.get('/api/medicalrecords/:id', auth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const medicalRecord = await MedicalRecord.findById(id)
+      .populate('pet', 'name species breed owner')
+      .populate('veterinarian', 'name specialization')
+      .populate('appointment', 'date time status')
+      .populate('medications.prescribedBy', 'name');
+
+    if (!medicalRecord) {
+      return res.status(404).json({ message: 'Medical record not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { medicalRecord }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Update medical record
+app.put('/api/medicalrecords/:id', auth, roleCheck('veterinarian', 'admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const medicalRecord = await MedicalRecord.findByIdAndUpdate(
+      id,
+      req.body,
+      { new: true, runValidators: true }
+    );
+
+    if (!medicalRecord) {
+      return res.status(404).json({ message: 'Medical record not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Medical record updated successfully',
+      data: { medicalRecord }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Delete medical record
+app.delete('/api/medicalrecords/:id', auth, roleCheck('veterinarian', 'admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const medicalRecord = await MedicalRecord.findByIdAndDelete(id);
+
+    if (!medicalRecord) {
+      return res.status(404).json({ message: 'Medical record not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Medical record deleted successfully'
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// ============================================
+// ADMIN ROUTES
+// ============================================
+
+// Dashboard stats
+app.get('/api/admin/dashboard', auth, roleCheck('admin'), async (req: Request, res: Response) => {
+  try {
+    const [
+      totalUsers,
+      totalPets,
+      totalAppointments,
+      totalServices,
+      totalPrescriptions,
+      totalPayments,
+      pendingAppointments
+    ] = await Promise.all([
+      User.countDocuments(),
+      Pet.countDocuments(),
+      Appointment.countDocuments(),
+      Service.countDocuments(),
+      Prescription.countDocuments(),
+      Payment.countDocuments(),
+      Appointment.countDocuments({ status: 'scheduled' })
+    ]);
+
+    const stats = {
+      totalUsers,
+      totalPets,
+      totalAppointments,
+      totalServices,
+      totalPrescriptions,
+      totalPayments,
+      pendingAppointments
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: stats
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get all users
+app.get('/api/admin/users', auth, roleCheck('admin'), async (req: Request, res: Response) => {
+  try {
+    const users = await User.find().select('-password').sort({ createdAt: -1 });
+    return res.status(200).json({
+      success: true,
+      message: 'Users fetched successfully',
+      data: { users }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Update user role
+app.put('/api/admin/users/:id/role', auth, roleCheck('admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!['admin', 'veterinarian', 'client'].includes(role)) {
+      return res.status(400).json({ message: 'Invalid role' });
+    }
+
+    const user = await User.findByIdAndUpdate(id, { role }, { new: true }).select('-password');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'User role updated successfully',
+      data: { user }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Toggle user status
+app.put('/api/admin/users/:id/toggle', auth, roleCheck('admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id);
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    user.isActive = !user.isActive;
+    await user.save();
+
+    const userData = user.toObject() as Partial<IUser>;
+    delete userData.password;
+
+    return res.status(200).json({
+      success: true,
+      message: `User ${user.isActive ? 'activated' : 'deactivated'} successfully`,
+      data: { user: userData }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
