@@ -845,3 +845,187 @@ app.delete('/api/pets/:id', auth, async (req: Request, res: Response) => {
     });
   }
 });
+
+// ============================================
+// APPOINTMENT ROUTES
+// ============================================
+
+// Create appointment
+app.post('/api/appointments', auth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { petId, veterinarianId, appointmentType, date, time, symptoms, notes, priority, amount } = req.body;
+
+    const pet = await Pet.findOne({ _id: petId, owner: req.user?._id });
+    if (!pet) {
+      return res.status(404).json({ message: 'Pet not found or not owned by user' });
+    }
+
+    const veterinarian = await User.findOne({ _id: veterinarianId, role: 'veterinarian' });
+    if (!veterinarian) {
+      return res.status(404).json({ message: 'Veterinarian not found' });
+    }
+
+    const conflictingAppointment = await Appointment.findOne({
+      veterinarian: veterinarianId,
+      date: new Date(date),
+      time,
+      status: { $in: ['scheduled', 'confirmed'] }
+    });
+
+    if (conflictingAppointment) {
+      return res.status(400).json({ message: 'Veterinarian is not available at this time' });
+    }
+
+    const appointment = await Appointment.create({
+      client: req.user?._id,
+      pet: petId,
+      veterinarian: veterinarianId,
+      appointmentType,
+      date,
+      time,
+      symptoms,
+      notes,
+      priority: priority || 'normal',
+      amount: amount || 0
+    });
+
+    const populatedAppointment = await Appointment.findById(appointment._id)
+      .populate('client', 'name email phone')
+      .populate('pet', 'name species breed')
+      .populate('veterinarian', 'name specialization');
+
+    return res.status(201).json({
+      success: true,
+      message: 'Appointment created successfully',
+      data: { appointment: populatedAppointment }
+    });
+  } catch (error: any) {
+    console.error('Appointment Creation Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get all appointments
+app.get('/api/appointments', auth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { status, dateFrom, dateTo } = req.query;
+    const query: any = {};
+
+    if (req.user?.role === 'client') {
+      query.client = req.user._id;
+    } else if (req.user?.role === 'veterinarian') {
+      query.veterinarian = req.user._id;
+    }
+
+    if (status) query.status = status;
+    if (dateFrom || dateTo) {
+      query.date = {};
+      if (dateFrom) query.date.$gte = new Date(dateFrom as string);
+      if (dateTo) query.date.$lte = new Date(dateTo as string);
+    }
+
+    const appointments = await Appointment.find(query)
+      .populate('client', 'name email phone')
+      .populate('pet', 'name species breed image')
+      .populate('veterinarian', 'name specialization')
+      .sort({ date: 1, time: 1 });
+
+    return res.status(200).json({
+      success: true,
+      data: { appointments }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Get appointment by ID
+app.get('/api/appointments/:id', auth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const appointment = await Appointment.findById(id)
+      .populate('client', 'name email phone address')
+      .populate('pet', 'name species breed image')
+      .populate('veterinarian', 'name specialization phone');
+
+    if (!appointment) {
+      return res.status(404).json({ message: 'Appointment not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { appointment }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Update appointment status
+app.put('/api/appointments/:id/status', auth, roleCheck('veterinarian', 'admin'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status, notes } = req.body;
+
+    const appointment = await Appointment.findByIdAndUpdate(
+      id,
+      { status, notes },
+      { new: true, runValidators: true }
+    )
+      .populate('client', 'name email')
+      .populate('pet', 'name species')
+      .populate('veterinarian', 'name');
+
+    if (!appointment) {
+      return res.status(404).json({ message: 'Appointment not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Appointment status updated successfully',
+      data: { appointment }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
+
+// Cancel appointment
+app.put('/api/appointments/:id/cancel', auth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const appointment = await Appointment.findByIdAndUpdate(
+      id,
+      { status: 'cancelled' },
+      { new: true }
+    );
+
+    if (!appointment) {
+      return res.status(404).json({ message: 'Appointment not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Appointment cancelled successfully',
+      data: { appointment }
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server Error'
+    });
+  }
+});
